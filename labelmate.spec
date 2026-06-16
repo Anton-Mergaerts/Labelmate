@@ -7,11 +7,13 @@ block_cipher = None
 
 brother_datas, brother_binaries, brother_hidden = collect_all('brother_ql')
 
+asset_datas = [('assets', 'assets')]
+
 a = Analysis(
     ['labelmate.py'],
     pathex=[],
     binaries=brother_binaries,
-    datas=brother_datas,
+    datas=brother_datas + asset_datas,
     hiddenimports=[
         'win32print',
         'win32api',

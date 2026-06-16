@@ -1,7 +1,9 @@
-import sqlite3
+import csv
 import json
 import shutil
+import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 from src.paths import backup_dir, db_path
 
@@ -57,16 +59,19 @@ def init_db():
 
 def seed(conn):
     cur = conn.cursor()
-    brands = ['Acme', 'Globex']
+    brands = ['Engels', 'Schildermans', 'Mergaerts', 'VDBIEST']
     models = {
-        'Acme': ['A100', 'A200'],
-        'Globex': ['G1', 'G2']
+        'Engels': ['Cyriel'],
+        'Schildermans': ['Lode'],
+        'Mergaerts': ['Anton', 'Lennard'],
+        'VDBIEST': ['Bram']
     }
     sizes = {
-        'A100': ['Small', 'Medium'],
-        'A200': ['Medium', 'Large'],
-        'G1': ['One'],
-        'G2': ['Two']
+        'Cyriel': ['175cm'],
+        'Lode': ['172cm'],
+        'Anton': ['185cm'],
+        'Lennard': ['215cm'],
+        'Bram': ['57cm']
     }
 
     for b in brands:
@@ -104,6 +109,24 @@ def get_sizes(model_id):
     cur = conn.cursor()
     cur.execute('SELECT id, name FROM sizes WHERE model_id = ? ORDER BY name', (model_id,))
     rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def list_catalog_entries() -> list[dict[str, str]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT b.name, m.name, s.name
+        FROM sizes s
+        JOIN models m ON m.id = s.model_id
+        JOIN brands b ON b.id = m.brand_id
+        ORDER BY b.name, m.name, s.name
+    ''')
+    rows = [
+        {'brand': brand, 'model': model, 'size': size}
+        for brand, model, size in cur.fetchall()
+    ]
     conn.close()
     return rows
 
@@ -234,3 +257,114 @@ def reset_catalog():
     conn.commit()
     seed(conn)
     conn.close()
+
+
+def _parse_catalog_csv(path: Path | str) -> list[tuple[str, str, str]]:
+    with open(path, newline='', encoding='utf-8-sig') as handle:
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        if not header:
+            raise ValueError('CSV file is empty.')
+        columns = {name.strip().lower(): index for index, name in enumerate(header)}
+        missing = [name for name in ('brand', 'model', 'size') if name not in columns]
+        if missing:
+            raise ValueError(f'CSV must include columns: brand, model, size (missing: {", ".join(missing)})')
+
+        rows: list[tuple[str, str, str]] = []
+        for line_no, record in enumerate(reader, start=2):
+            if not record or not any(cell.strip() for cell in record):
+                continue
+            try:
+                brand = record[columns['brand']].strip()
+                model = record[columns['model']].strip()
+                size = record[columns['size']].strip()
+            except IndexError as exc:
+                raise ValueError(f'CSV row {line_no} is incomplete.') from exc
+            if not brand or not model or not size:
+                raise ValueError(f'CSV row {line_no} must have brand, model, and size.')
+            rows.append((brand, model, size))
+    if not rows:
+        raise ValueError('CSV file has a header but no data rows.')
+    return rows
+
+
+def export_catalog_csv(path: Path | str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        '''
+        SELECT b.name, m.name, s.name
+        FROM brands b
+        JOIN models m ON m.brand_id = b.id
+        JOIN sizes s ON s.model_id = m.id
+        ORDER BY b.name, m.name, s.name
+        '''
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    with open(path, 'w', newline='', encoding='utf-8') as handle:
+        writer = csv.writer(handle)
+        writer.writerow(['brand', 'model', 'size'])
+        writer.writerows(rows)
+    return len(rows)
+
+
+def import_catalog_csv(path: Path | str, *, replace: bool = True) -> dict:
+    rows = _parse_catalog_csv(path)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        if replace:
+            cur.execute('DELETE FROM sizes')
+            cur.execute('DELETE FROM models')
+            cur.execute('DELETE FROM brands')
+
+        brand_ids: dict[str, int] = {}
+        model_ids: dict[tuple[int, str], int] = {}
+        sizes_added = 0
+
+        for brand, model, size in rows:
+            if brand not in brand_ids:
+                cur.execute('SELECT id FROM brands WHERE name = ?', (brand,))
+                found = cur.fetchone()
+                if found:
+                    brand_ids[brand] = found[0]
+                else:
+                    cur.execute('INSERT INTO brands (name) VALUES (?)', (brand,))
+                    brand_ids[brand] = cur.lastrowid
+
+            brand_id = brand_ids[brand]
+            model_key = (brand_id, model)
+            if model_key not in model_ids:
+                cur.execute(
+                    'SELECT id FROM models WHERE brand_id = ? AND name = ?',
+                    (brand_id, model),
+                )
+                found = cur.fetchone()
+                if found:
+                    model_ids[model_key] = found[0]
+                else:
+                    cur.execute(
+                        'INSERT INTO models (brand_id, name) VALUES (?, ?)',
+                        (brand_id, model),
+                    )
+                    model_ids[model_key] = cur.lastrowid
+
+            model_id = model_ids[model_key]
+            cur.execute(
+                'SELECT id FROM sizes WHERE model_id = ? AND name = ?',
+                (model_id, size),
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    'INSERT INTO sizes (model_id, name) VALUES (?, ?)',
+                    (model_id, size),
+                )
+                sizes_added += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {'rows_read': len(rows), 'sizes_added': sizes_added, 'replaced': replace}

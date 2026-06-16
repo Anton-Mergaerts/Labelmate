@@ -8,6 +8,9 @@ DEFAULT_SETTINGS = {
     'conn': '',
     'model': 'QL-820NWB',
     'label_size': '62',
+    'text_scale': 'large',
+    'show_logo': True,
+    'footer_spacing': 'normal',
 }
 
 
@@ -50,6 +53,18 @@ def ensure_printer_configured():
 
     if not settings.get('label_size'):
         settings['label_size'] = '62'
+        changed = True
+
+    if settings.get('text_scale') != 'large':
+        settings['text_scale'] = 'large'
+        changed = True
+
+    if not isinstance(settings.get('show_logo'), bool):
+        settings['show_logo'] = True
+        changed = True
+
+    if settings.get('footer_spacing') not in ('tight', 'normal', 'loose'):
+        settings['footer_spacing'] = 'normal'
         changed = True
 
     conn = settings.get('conn', '').strip()

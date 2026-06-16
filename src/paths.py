@@ -51,3 +51,7 @@ def prints_dir() -> Path:
     if is_frozen():
         return user_data_dir() / 'prints'
     return project_root() / 'app_data' / 'prints'
+
+
+def logo_path() -> Path:
+    return project_root() / 'assets' / 'kick_logo_1024-1.webp'

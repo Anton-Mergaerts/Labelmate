@@ -122,7 +122,7 @@ def check_brother_printer() -> CheckResult:
         return _fail(
             'Brother printer',
             'No Brother QL printer found in Windows.',
-            'Add the printer in Settings using the official Brother QL-820 driver.',
+            'Open Printer Setup → download the Brother driver, then add the printer in Windows.',
         )
     except Exception as exc:
         return _fail('Brother printer', f'Could not list printers: {exc}')
@@ -149,8 +149,14 @@ def check_printer_driver() -> CheckResult:
         if printing.uses_ipp_driver(printer_name):
             return _fail(
                 'Printer driver',
+                f'"{printer_name}" uses {driver} (Microsoft Windows driver).',
+                'Install the Brother QL-820NWB driver — Labelmate cannot print via IPP/generic drivers.',
+            )
+        if 'brother' not in driver.lower():
+            return _warn(
+                'Printer driver',
                 f'"{printer_name}" uses {driver}.',
-                printing.BROTHER_DRIVER_HELP,
+                'If printing fails, reinstall using the official Brother QL-820NWB driver.',
             )
         return _ok('Printer driver', f'{printer_name} · {driver}')
     except Exception as exc:

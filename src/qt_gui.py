@@ -5,9 +5,11 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QTabWidget,
@@ -28,6 +31,8 @@ from PySide6.QtWidgets import (
 from src import db
 from src import printing
 from src import requirements_check
+from src import setup_help
+from src.paths import db_path
 
 
 APP_BG = '#f4f7fb'
@@ -68,36 +73,32 @@ def _pil_to_qpixmap(image) -> QPixmap:
 
 
 def _compose_preview_pixmap(label: QPixmap) -> QPixmap:
-    """Wrap the printable area in a 62 mm tape frame for the on-screen preview."""
+    """Show the printable label on 62 mm tape, with approximate printer feed margins."""
     if label.isNull():
         return label
 
-    tape_ratio = printing.TAPE_WIDTH_PX / printing.PRINTABLE_WIDTH_PX
     label_w = label.width()
     label_h = label.height()
-    side_margin = max(4, int((label_w * (tape_ratio - 1)) / 2))
-    pad = max(6, label_h // 18)
-    shadow = max(4, label_h // 24)
+    side_margin = max(
+        1,
+        int(round(label_w * (printing.TAPE_WIDTH_PX - printing.PRINTABLE_WIDTH_PX) / printing.PRINTABLE_WIDTH_PX / 2)),
+    )
+    feed_top = max(4, int(round(label_h * printing.PREVIEW_FEED_TOP_RATIO)))
+    feed_bottom = max(4, int(round(label_h * printing.PREVIEW_FEED_BOTTOM_RATIO)))
 
-    canvas_w = label_w + side_margin * 2 + pad * 2
-    canvas_h = label_h + pad * 2 + shadow
+    canvas_w = label_w + side_margin * 2
+    canvas_h = label_h + feed_top + feed_bottom
     framed = QPixmap(canvas_w, canvas_h)
-    framed.fill(Qt.GlobalColor.transparent)
+    framed.fill(QColor('#ffffff'))
 
     painter = QPainter(framed)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    label_x = side_margin + pad
-    label_y = pad
     tape_color = QColor('#b7c0cc')
-    shadow_color = QColor(20, 32, 48, 55)
-
-    painter.fillRect(label_x + 3, label_y + shadow, label_w, label_h, shadow_color)
-    painter.fillRect(pad, label_y, side_margin, label_h, tape_color)
-    painter.fillRect(label_x + label_w, label_y, side_margin, label_h, tape_color)
-    painter.drawPixmap(label_x, label_y, label)
-    painter.setPen(QPen(QColor('#94a3b8'), 1))
-    painter.drawRect(label_x, label_y, label_w - 1, label_h - 1)
+    painter.fillRect(0, 0, side_margin, canvas_h, tape_color)
+    painter.fillRect(side_margin + label_w, 0, side_margin, canvas_h, tape_color)
+    painter.drawPixmap(side_margin, feed_top, label)
+    painter.setPen(QPen(QColor('#8fa0b3'), 1))
+    painter.drawRect(side_margin, feed_top, label_w - 1, label_h - 1)
     painter.end()
 
     return framed
@@ -109,6 +110,32 @@ def apply_theme(app: QApplication):
     app.setStyleSheet(
         f'''
         QMainWindow {{ background: {APP_BG}; }}
+        QMenuBar {{
+            background: {PANEL_BG};
+            border-bottom: 1px solid {BORDER};
+            padding: 4px 8px;
+        }}
+        QMenuBar::item {{
+            background: transparent;
+            padding: 6px 10px;
+            border-radius: 8px;
+        }}
+        QMenuBar::item:selected {{
+            background: {SOFT_BLUE};
+        }}
+        QMenu {{
+            background: {PANEL_BG};
+            border: 1px solid {BORDER};
+            padding: 6px;
+        }}
+        QMenu::item {{
+            padding: 8px 24px 8px 12px;
+            border-radius: 8px;
+        }}
+        QMenu::item:selected {{
+            background: {ACCENT};
+            color: white;
+        }}
         QWidget {{ color: {TEXT_PRIMARY}; }}
         QFrame#Card, QFrame#PreviewCard, QFrame#DialogCard {{
             background: {PANEL_BG};
@@ -156,6 +183,28 @@ def apply_theme(app: QApplication):
         }}
         QLabel#PreviewImage {{
             background: transparent;
+        }}
+        QLabel#SetupChecklist {{
+            color: {TEXT_PRIMARY};
+            background: {SOFT_BLUE};
+            border: 1px solid {BORDER};
+            border-radius: 12px;
+            padding: 12px 14px;
+        }}
+        QLabel#SetupNote {{
+            color: {TEXT_SECONDARY};
+            background: #f8fafc;
+            border: 1px solid {BORDER};
+            border-radius: 12px;
+            padding: 12px 14px;
+            font-size: 9pt;
+        }}
+        QLabel#SetupWarning {{
+            color: #8a2b2b;
+            background: #fff1f1;
+            border: 1px solid #f0c7c7;
+            border-radius: 12px;
+            padding: 12px 14px;
         }}
         QLabel#PreviewMeta {{
             color: {TEXT_SECONDARY};
@@ -229,26 +278,63 @@ def apply_theme(app: QApplication):
             color: white;
         }}
         QPushButton {{
-            border: 1px solid {BORDER};
+            border: 1px solid #c5d0e0;
             border-radius: 12px;
             background: white;
-            padding: 10px 14px;
+            color: {TEXT_PRIMARY};
+            font-weight: 600;
+            padding: 10px 16px;
+            min-height: 18px;
         }}
         QPushButton:hover {{
-            background: #f8fbff;
+            background: #f0f5fc;
+            border-color: {ACCENT};
+        }}
+        QPushButton:pressed {{
+            background: #e4edfb;
         }}
         QPushButton#PrimaryButton {{
-            border: none;
+            border: 2px solid {ACCENT_DARK};
             background: {ACCENT};
             color: white;
             font-weight: 700;
-            padding: 11px 16px;
+            font-size: 11pt;
+            padding: 12px 24px;
+            min-height: 22px;
         }}
         QPushButton#PrimaryButton:hover {{
             background: {ACCENT_DARK};
+            border-color: #1d4fb8;
+        }}
+        QPushButton#PrimaryButton:pressed {{
+            background: #1d4fb8;
+        }}
+        QPushButton#SecondaryButton {{
+            border: 2px solid {ACCENT};
+            background: {SOFT_BLUE};
+            color: {ACCENT_DARK};
+            font-weight: 700;
+            font-size: 11pt;
+            padding: 12px 24px;
+            min-height: 22px;
+        }}
+        QPushButton#SecondaryButton:hover {{
+            background: #dfeaff;
+            border-color: {ACCENT_DARK};
+        }}
+        QPushButton#SecondaryButton:pressed {{
+            background: #d0e2ff;
         }}
         QPushButton#GhostButton {{
-            background: transparent;
+            background: white;
+            border: 1px solid #c5d0e0;
+            color: {TEXT_PRIMARY};
+            font-weight: 600;
+        }}
+        QPushButton#GhostButton:hover {{
+            background: #f8fbff;
+            border-color: {ACCENT};
+            color: {ACCENT_DARK};
         }}
         QDialog {{
             background: {APP_BG};
@@ -268,24 +354,148 @@ def item_payload(item: QListWidgetItem | None):
     return item.data(Qt.UserRole) or None
 
 
-class RequirementsDialog(QDialog):
+def blocking_check(results: list[requirements_check.CheckResult], name: str):
+    return next((item for item in results if item.name == name and item.blocking), None)
+
+
+def _show_print_blocked_dialog(parent, results: list[requirements_check.CheckResult]) -> None:
+    driver_issue = blocking_check(results, 'Printer driver')
+    if driver_issue:
+        box = QMessageBox(parent)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle('Brother driver required')
+        box.setText(
+            'This printer is using a Microsoft Windows driver. '
+            'Labelmate cannot print labels that way.'
+        )
+        box.setInformativeText(
+            'Install the official Brother QL-820NWB driver from brother.com and add the '
+            'printer again. The driver name should be “Brother QL-820NWB”, not '
+            '“Microsoft IPP Class Driver”.\n\n'
+            f'{driver_issue.message}'
+        )
+        setup_button = box.addButton('Open Printer Setup', QMessageBox.ButtonRole.ActionRole)
+        download_button = box.addButton('Download Brother driver', QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == setup_button:
+            PrinterSetupDialog(parent, results=results).exec()
+        elif clicked == download_button:
+            setup_help.open_brother_driver_download()
+        return
+
+    brother_issue = blocking_check(results, 'Brother printer')
+    if brother_issue:
+        box = QMessageBox(parent)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle('Brother printer not found')
+        box.setText('No Brother QL printer was found in Windows.')
+        box.setInformativeText(
+            'Add the printer using the official Brother driver, then pick it in '
+            'Printer Settings.\n\n'
+            f'{brother_issue.hint or brother_issue.message}'
+        )
+        setup_button = box.addButton('Open Printer Setup', QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() == setup_button:
+            PrinterSetupDialog(parent, results=results).exec()
+        return
+
+    PrinterSetupDialog(parent, results=results).exec()
+
+
+class PrinterSetupDialog(QDialog):
     def __init__(self, parent=None, *, results=None):
         super().__init__(parent)
-        self.setWindowTitle('System Check')
-        self.setMinimumWidth(560)
+        self.setWindowTitle('Printer Setup')
+        self.setMinimumWidth(620)
+        self.setMinimumHeight(520)
         self.results = results or requirements_check.run_all_checks()
 
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
 
+        title = QLabel('Printer Setup')
+        title.setObjectName('CardTitle')
+        layout.addWidget(title)
+        layout.addWidget(QLabel('One-time Windows + Brother setup. Labelmate cannot install drivers for you.'))
+
+        checklist = QLabel(setup_help.SETUP_CHECKLIST)
+        checklist.setObjectName('SetupChecklist')
+        checklist.setWordWrap(True)
+        layout.addWidget(checklist)
+
+        raster_note = QLabel(setup_help.TROUBLESHOOTING_INFO)
+        raster_note.setObjectName('SetupNote')
+        raster_note.setWordWrap(True)
+        layout.addWidget(raster_note)
+
+        self.ipp_warning = QLabel(setup_help.IPP_DRIVER_FIX_STEPS)
+        self.ipp_warning.setObjectName('SetupWarning')
+        self.ipp_warning.setWordWrap(True)
+        self.ipp_warning.setVisible(self._has_ipp_driver_issue())
+        layout.addWidget(self.ipp_warning)
+
+        action_row = QHBoxLayout()
+        driver_button = QPushButton('Download Brother driver')
+        driver_button.setObjectName('GhostButton')
+        driver_button.clicked.connect(setup_help.open_brother_driver_download)
+        printers_button = QPushButton('Open Windows Printers')
+        printers_button.setObjectName('GhostButton')
+        printers_button.clicked.connect(setup_help.open_windows_printers)
+        properties_button = QPushButton('Printer properties')
+        properties_button.setObjectName('GhostButton')
+        properties_button.clicked.connect(self._open_printer_properties)
+        settings_button = QPushButton('Labelmate printer settings')
+        settings_button.setObjectName('PrimaryButton')
+        settings_button.clicked.connect(self._open_labelmate_printer_settings)
+        action_row.addWidget(driver_button)
+        action_row.addWidget(printers_button)
+        action_row.addWidget(properties_button)
+        action_row.addWidget(settings_button)
+        layout.addLayout(action_row)
+
         ok_count, warn_count, fail_count = requirements_check.summarize(self.results)
-        summary = QLabel(
-            f'{ok_count} passed · {warn_count} warning(s) · {fail_count} issue(s) blocking print'
+        self.summary_label = QLabel(
+            f'System check: {ok_count} passed · {warn_count} warning(s) · {fail_count} blocking issue(s)'
         )
-        summary.setObjectName('CardSubTitle')
-        layout.addWidget(summary)
+        self.summary_label.setObjectName('CardSubTitle')
+        layout.addWidget(self.summary_label)
 
         self.list_widget = QListWidget()
+        layout.addWidget(self.list_widget, 1)
+        self._populate_results()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        refresh_button = buttons.addButton('Re-check', QDialogButtonBox.ButtonRole.ActionRole)
+        refresh_button.clicked.connect(self._refresh)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _has_ipp_driver_issue(self) -> bool:
+        return any(item.name == 'Printer driver' and item.blocking for item in self.results)
+
+    def _current_printer_name(self) -> str:
+        settings = printer_store.load_settings()
+        name = settings.get('conn', '').strip()
+        if name:
+            return name
+        try:
+            return printing.find_brother_printer() or ''
+        except Exception:
+            return ''
+
+    def _open_printer_properties(self):
+        setup_help.open_printer_properties(self._current_printer_name())
+
+    def _open_labelmate_printer_settings(self):
+        if PrinterSettingsDialog(self).exec():
+            self._refresh()
+
+    def _populate_results(self):
+        self.list_widget.clear()
         for item in self.results:
             icon = {'ok': '✓', 'warn': '!', 'fail': '✗'}.get(item.status, '?')
             text = f'{icon}  {item.name}: {item.message}'
@@ -297,23 +507,165 @@ class RequirementsDialog(QDialog):
             elif item.status == 'warn':
                 list_item.setForeground(Qt.GlobalColor.darkYellow)
             self.list_widget.addItem(list_item)
-        layout.addWidget(self.list_widget, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        refresh_button = buttons.addButton('Re-check', QDialogButtonBox.ButtonRole.ActionRole)
-        refresh_button.clicked.connect(self._refresh)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
 
     def _refresh(self):
         self.results = requirements_check.run_all_checks()
+        self.ipp_warning.setVisible(self._has_ipp_driver_issue())
+        ok_count, warn_count, fail_count = requirements_check.summarize(self.results)
+        self.summary_label.setText(
+            f'System check: {ok_count} passed · {warn_count} warning(s) · {fail_count} blocking issue(s)'
+        )
+        self._populate_results()
+
+
+class BulkPrintWorker(QThread):
+    progress = Signal(int, int, str)
+    finished_ok = Signal(str, int)
+    failed = Signal(int, str, str)
+
+    def __init__(self, jobs, settings):
+        super().__init__()
+        self.jobs = jobs
+        self.settings = settings
+
+    def run(self):
+        printer_name = ''
+        total = len(self.jobs)
+        try:
+            for index, job in enumerate(self.jobs, start=1):
+                label = f"{job['brand']} / {job['model']} / {job['size']}"
+                self.progress.emit(
+                    index - 1,
+                    total,
+                    f'Printing {index} of {total}\n{label}',
+                )
+                printer_name = printing.print_label(
+                    job['brand'],
+                    job['model'],
+                    job['size'],
+                    self.settings.get('conn', ''),
+                    ql_model=self.settings.get('model', 'QL-820NWB'),
+                    label_size=self.settings.get('label_size', '62'),
+                    text_scale=self.settings.get('text_scale', 'large'),
+                    show_logo=self.settings.get('show_logo', True),
+                    footer_spacing=self.settings.get('footer_spacing', 'normal'),
+                    wait_for_queue=True,
+                )
+                self.progress.emit(
+                    index,
+                    total,
+                    f'Printed {index} of {total}\n{label}',
+                )
+            self.finished_ok.emit(printer_name, total)
+        except BaseException as exc:
+            message = str(exc) or exc.__class__.__name__
+            self.failed.emit(index, label, message)
+
+
+class BulkPrintDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Bulk Print')
+        self.setMinimumSize(520, 460)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        card = _card_frame('DialogCard')
+        outer.addWidget(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel('Bulk Print')
+        title.setObjectName('CardTitle')
+        layout.addWidget(title)
+        layout.addWidget(QLabel('Select catalog entries to print. Labels are sent one after another.'))
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        layout.addWidget(self.list_widget, 1)
+
+        self.summary_label = QLabel('')
+        self.summary_label.setObjectName('StatusLabel')
+        layout.addWidget(self.summary_label)
+
+        select_row = QHBoxLayout()
+        select_all = QPushButton('Select all')
+        select_all.setObjectName('GhostButton')
+        select_all.clicked.connect(self._select_all)
+        select_row.addWidget(select_all)
+        clear_all = QPushButton('Clear all')
+        clear_all.setObjectName('GhostButton')
+        clear_all.clicked.connect(self._clear_all)
+        select_row.addWidget(clear_all)
+        select_row.addStretch(1)
+        layout.addLayout(select_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.print_button = buttons.addButton('Print selected', QDialogButtonBox.ButtonRole.AcceptRole)
+        self.print_button.setObjectName('PrimaryButton')
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self._accept_selection)
+        layout.addWidget(buttons)
+
+        self.list_widget.itemChanged.connect(self._update_summary)
+        self._populate()
+
+    def _populate(self):
+        self.list_widget.blockSignals(True)
         self.list_widget.clear()
-        for item in self.results:
-            icon = {'ok': '✓', 'warn': '!', 'fail': '✗'}.get(item.status, '?')
-            text = f'{icon}  {item.name}: {item.message}'
-            if item.hint:
-                text += f'\n     {item.hint}'
-            self.list_widget.addItem(QListWidgetItem(text))
+        for entry in db.list_catalog_entries():
+            item = QListWidgetItem(f"{entry['brand']} / {entry['model']} / {entry['size']}")
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.list_widget.addItem(item)
+        self.list_widget.blockSignals(False)
+        self._update_summary()
+
+    def _selected_entries(self) -> list[dict[str, str]]:
+        entries = []
+        for index in range(self.list_widget.count()):
+            item = self.list_widget.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                entries.append(item.data(Qt.ItemDataRole.UserRole))
+        return entries
+
+    def _select_all(self):
+        self.list_widget.blockSignals(True)
+        for index in range(self.list_widget.count()):
+            self.list_widget.item(index).setCheckState(Qt.CheckState.Checked)
+        self.list_widget.blockSignals(False)
+        self._update_summary()
+
+    def _clear_all(self):
+        self.list_widget.blockSignals(True)
+        for index in range(self.list_widget.count()):
+            self.list_widget.item(index).setCheckState(Qt.CheckState.Unchecked)
+        self.list_widget.blockSignals(False)
+        self._update_summary()
+
+    def _update_summary(self):
+        selected = len(self._selected_entries())
+        total = self.list_widget.count()
+        if total == 0:
+            self.summary_label.setText('No catalog entries yet — add labels in Database Manager.')
+            self.print_button.setEnabled(False)
+            return
+        self.print_button.setEnabled(selected > 0)
+        noun = 'label' if selected == 1 else 'labels'
+        self.summary_label.setText(f'{selected} of {total} {noun} selected')
+
+    def _accept_selection(self):
+        if not self._selected_entries():
+            QMessageBox.information(self, 'Bulk Print', 'Select at least one label to print.')
+            return
+        self.accept()
+
+    def selected_entries(self) -> list[dict[str, str]]:
+        return self._selected_entries()
 
 
 class PrintWorker(QThread):
@@ -336,6 +688,9 @@ class PrintWorker(QThread):
                 self.settings.get('conn', ''),
                 ql_model=self.settings.get('model', 'QL-820NWB'),
                 label_size=self.settings.get('label_size', '62'),
+                text_scale=self.settings.get('text_scale', 'large'),
+                show_logo=self.settings.get('show_logo', True),
+                footer_spacing=self.settings.get('footer_spacing', 'normal'),
             )
             self.finished_ok.emit(printer_name)
         except BaseException as exc:
@@ -530,18 +885,42 @@ class DatabaseManagerDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        layout.addWidget(QLabel('Maintenance tools'))
-        layout.addWidget(QLabel('Use these before major edits or when you want to return to the built-in seed data.'))
+        layout.addWidget(QLabel('Catalog import / export'))
+        layout.addWidget(QLabel(
+            'CSV format: brand, model, size — one label combination per row. '
+            'Edit in Excel or Google Sheets, then import here.'
+        ))
+        layout.addWidget(self._button('Export catalog to CSV…', self.export_catalog_csv))
+        layout.addWidget(self._button('Import catalog from CSV…', self.import_catalog_csv))
 
+        layout.addWidget(QLabel('Database file'))
+        path_label = QLabel(str(db_path()))
+        path_label.setObjectName('StatusLabel')
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+        layout.addWidget(QLabel(
+            'You can edit labelmate.db with DB Browser for SQLite or similar — '
+            'close Labelmate first, back up first, and keep the brands / models / sizes tables intact.'
+        ))
+        layout.addWidget(self._button('Open database folder', self.open_database_folder))
+
+        layout.addWidget(QLabel('Maintenance'))
+        layout.addWidget(QLabel('Use these before major edits or when you want to return to the built-in seed data.'))
         layout.addWidget(self._button('Backup Database', self.backup_database))
         layout.addWidget(self._button('Reset Catalog to Seed Data', self.reset_catalog))
         layout.addStretch(1)
         return tab
 
-    def _button(self, text, slot, *, primary=False):
+    def _button(self, text, slot, *, primary=False, secondary=False):
         button = QPushButton(text)
+        if primary:
+            button.setObjectName('PrimaryButton')
+        elif secondary:
+            button.setObjectName('SecondaryButton')
+        else:
+            button.setObjectName('GhostButton')
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(slot)
-        button.setObjectName('PrimaryButton' if primary else 'GhostButton')
         return button
 
     def _prompt_text(self, title, initial=''):
@@ -701,6 +1080,75 @@ class DatabaseManagerDialog(QDialog):
         path = db.backup_database()
         QMessageBox.information(self, 'Database', f'Backup created:\n{path}')
 
+    def export_catalog_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            'Export catalog to CSV',
+            'labelmate-catalog.csv',
+            'CSV files (*.csv)',
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+        try:
+            count = db.export_catalog_csv(path)
+        except OSError as exc:
+            QMessageBox.critical(self, 'Export CSV', str(exc))
+            return
+        QMessageBox.information(
+            self,
+            'Export CSV',
+            f'Exported {count} label row(s) to:\n{path}',
+        )
+
+    def import_catalog_csv(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Import catalog from CSV',
+            '',
+            'CSV files (*.csv)',
+        )
+        if not path:
+            return
+
+        replace = QMessageBox.question(
+            self,
+            'Import CSV',
+            'Replace the entire catalog with this CSV?\n\n'
+            'Yes = clear existing brands/models/sizes, then import.\n'
+            'No = keep existing data and add new rows only.',
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if replace == QMessageBox.Cancel:
+            return
+
+        try:
+            result = db.import_catalog_csv(path, replace=replace == QMessageBox.Yes)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, 'Import CSV', str(exc))
+            return
+
+        mode = 'replaced catalog with' if result['replaced'] else 'merged'
+        QMessageBox.information(
+            self,
+            'Import CSV',
+            f'{mode.capitalize()} {result["rows_read"]} CSV row(s).\n'
+            f'New sizes added: {result["sizes_added"]}.',
+        )
+        self.refresh_all()
+
+    def open_database_folder(self):
+        import subprocess
+        import sys
+
+        folder = str(db_path().parent)
+        if sys.platform == 'win32':
+            subprocess.Popen(['explorer.exe', folder])
+        else:
+            subprocess.Popen(['xdg-open', folder])
+
     def reset_catalog(self):
         if QMessageBox.question(self, 'Database', 'Reset all catalog data back to the built-in seed set?') != QMessageBox.Yes:
             return
@@ -714,6 +1162,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Labelmate')
         self.resize(1120, 720)
         self.setMinimumSize(980, 640)
+
+        self._build_menu_bar()
 
         central = QWidget()
         central.setObjectName('AppRoot')
@@ -747,11 +1197,24 @@ class MainWindow(QMainWindow):
         printer_store.ensure_printer_configured()
         self.load_brands()
         self._preview_source = None
-        self.update_preview()
         self._print_worker = None
+        self._bulk_print_worker = None
+        self._bulk_progress = None
         self._check_results = []
         self.update_preview()
         self._apply_requirement_state(show_dialog=True)
+
+    def _build_menu_bar(self):
+        settings_menu = self.menuBar().addMenu('&Settings')
+        settings_menu.addAction('Printer Setup…', self.open_printer_setup)
+        settings_menu.addAction('Printer Settings…', self.open_printer_settings)
+        settings_menu.addSeparator()
+        settings_menu.addAction('Database Manager…', self.open_database_manager)
+
+        file_menu = self.menuBar().addMenu('&File')
+        file_menu.addAction('Bulk Print…', self.open_bulk_print)
+        file_menu.addSeparator()
+        file_menu.addAction('E&xit', self.close)
 
     def _build_builder_card(self):
         layout = QVBoxLayout(self.builder_card)
@@ -788,6 +1251,11 @@ class MainWindow(QMainWindow):
         form.addWidget(_field_label('Size'), 4, 0)
         form.addWidget(self.size_combo, 5, 0)
 
+        self.show_logo_check = QCheckBox('Show Kick logo on label')
+        self.show_logo_check.setObjectName('ShowLogoCheck')
+        form.addWidget(self.show_logo_check, 6, 0)
+        self._load_show_logo_setting()
+
         self.summary_label = QLabel('Selected: Brand / Model / Size')
         self.summary_label.setObjectName('StatusLabel')
         layout.addWidget(self.summary_label)
@@ -795,21 +1263,16 @@ class MainWindow(QMainWindow):
         self.brand_combo.currentIndexChanged.connect(self.load_models)
         self.model_combo.currentIndexChanged.connect(self.load_sizes)
         self.size_combo.currentIndexChanged.connect(self.update_preview)
+        self.show_logo_check.toggled.connect(self._show_logo_changed)
 
         button_row = QHBoxLayout()
         layout.addLayout(button_row)
 
         self.print_button = self._button('Print', self.print_label, primary=True)
-        self.check_button = self._button('System Check', self.open_system_check)
-        self.database_button = self._button('Database Manager', self.open_database_manager)
-        self.printer_button = self._button('Printer Settings', self.open_printer_settings)
-        self.quit_button = self._button('Quit', self.close)
-
+        self.bulk_print_button = self._button('Bulk Print', self.open_bulk_print, secondary=True)
         button_row.addWidget(self.print_button)
-        button_row.addWidget(self.check_button)
-        button_row.addWidget(self.database_button)
-        button_row.addWidget(self.printer_button)
-        button_row.addWidget(self.quit_button)
+        button_row.addWidget(self.bulk_print_button)
+        button_row.addStretch(1)
 
     def _build_preview_card(self):
         layout = QVBoxLayout(self.preview_card)
@@ -818,7 +1281,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel('Live Preview')
         title.setObjectName('CardTitle')
-        subtitle = QLabel('Print preview with 62 mm tape margins — updates as you change selections.')
+        subtitle = QLabel('Includes approximate printer feed · white = printed tape · gray = tape edge')
         subtitle.setObjectName('CardSubTitle')
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -829,7 +1292,7 @@ class MainWindow(QMainWindow):
         canvas_layout.setContentsMargins(20, 20, 20, 20)
         canvas_layout.setSpacing(10)
 
-        self.preview_tape_caption = QLabel('62 mm tape · white area = printable label')
+        self.preview_tape_caption = QLabel('62 mm tape')
         self.preview_tape_caption.setObjectName('PreviewTapeCaption')
         self.preview_tape_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         canvas_layout.addWidget(self.preview_tape_caption)
@@ -858,11 +1321,29 @@ class MainWindow(QMainWindow):
         self.printer_status.setObjectName('StatusLabel')
         layout.addWidget(self.printer_status)
 
-    def _button(self, text, slot, primary=False):
+    def _button(self, text, slot, primary=False, secondary=False):
         button = QPushButton(text)
-        button.setObjectName('PrimaryButton' if primary else 'GhostButton')
+        if primary:
+            button.setObjectName('PrimaryButton')
+        elif secondary:
+            button.setObjectName('SecondaryButton')
+        else:
+            button.setObjectName('GhostButton')
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(slot)
         return button
+
+    def _load_show_logo_setting(self):
+        settings = printer_store.load_settings()
+        self.show_logo_check.blockSignals(True)
+        self.show_logo_check.setChecked(settings.get('show_logo', True))
+        self.show_logo_check.blockSignals(False)
+
+    def _show_logo_changed(self, checked: bool):
+        settings = printer_store.load_settings()
+        settings['show_logo'] = checked
+        printer_store.save_settings(settings)
+        self.update_preview()
 
     def load_brands(self):
         self.brand_combo.blockSignals(True)
@@ -919,9 +1400,12 @@ class MainWindow(QMainWindow):
         self.summary_label.setText(f'Selected: {brand} / {model} / {size}')
         settings = printer_store.load_settings()
         label_size = settings.get('label_size', '62')
+        text_scale = settings.get('text_scale', 'large')
+        show_logo = settings.get('show_logo', True)
+        footer_spacing = settings.get('footer_spacing', 'normal')
         roll_name = printing.LABEL_ROLLS.get(label_size, {}).get('name', label_size)
         self.preview_meta.setText(
-            f'{roll_name} · printable {printing.PRINTABLE_WIDTH_PX} px wide · tape {printing.TAPE_WIDTH_PX} px'
+            f'{roll_name} · printable {printing.PRINTABLE_WIDTH_PX} px wide'
         )
 
         if brand == 'Brand' and not self.brand_combo.count():
@@ -931,10 +1415,18 @@ class MainWindow(QMainWindow):
             self.preview_meta.setText('')
             return
 
-        image = printing.render_label(brand, model, size, label_size=label_size)
+        image = printing.render_label(
+            brand,
+            model,
+            size,
+            label_size=label_size,
+            text_scale=text_scale,
+            show_logo=show_logo,
+            footer_spacing=footer_spacing,
+        )
         self._preview_source = _pil_to_qpixmap(image)
         self.preview_meta.setText(
-            f'{roll_name} · printable {image.width} × {image.height} px · tape {printing.TAPE_WIDTH_PX} px wide'
+            f'{roll_name} · printable {image.width} × {image.height} px'
         )
         self._refresh_preview_pixmap()
 
@@ -945,11 +1437,15 @@ class MainWindow(QMainWindow):
         if target.width() < 40 or target.height() < 40:
             return
 
-        max_w = int(target.width() * 0.92)
-        max_h = int(target.height() * 0.88)
+        max_w = int(target.width() * 0.98)
+        max_h = int(target.height() * 0.95)
+        tape_ratio = printing.TAPE_WIDTH_PX / printing.PRINTABLE_WIDTH_PX
+        feed_ratio = 1 + printing.PREVIEW_FEED_TOP_RATIO + printing.PREVIEW_FEED_BOTTOM_RATIO
+        max_label_w = max(40, int(max_w / tape_ratio))
+        max_label_h = max(40, int(max_h / feed_ratio))
         scaled_label = self._preview_source.scaled(
-            max_w,
-            max_h,
+            max_label_w,
+            max_label_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -967,6 +1463,7 @@ class MainWindow(QMainWindow):
         can_print = requirements_check.can_print(self._check_results)
 
         self.print_button.setEnabled(can_print)
+        self.bulk_print_button.setEnabled(can_print)
         if can_print and warn_count == 0:
             status = f'System check: {ok_count} passed — ready to print'
         elif can_print:
@@ -980,11 +1477,11 @@ class MainWindow(QMainWindow):
         roll_name = printing.LABEL_ROLLS.get(label_size, {}).get('name', label_size)
         self.printer_status.setText(f'{status} · {printer_name} · {roll_name}')
 
-        if show_dialog and (fail_count or warn_count):
-            RequirementsDialog(self, results=self._check_results).exec()
+        if show_dialog and fail_count:
+            PrinterSetupDialog(self, results=self._check_results).exec()
 
-    def open_system_check(self):
-        dialog = RequirementsDialog(self, results=self._check_results)
+    def open_printer_setup(self):
+        dialog = PrinterSetupDialog(self, results=self._check_results)
         dialog.exec()
         self._apply_requirement_state(show_dialog=False)
 
@@ -992,6 +1489,7 @@ class MainWindow(QMainWindow):
         dialog = PrinterSettingsDialog(self)
         if dialog.exec():
             self.update_preview()
+            self._load_show_logo_setting()
             self._apply_requirement_state(show_dialog=False)
 
     def open_database_manager(self):
@@ -999,24 +1497,116 @@ class MainWindow(QMainWindow):
         dialog.exec()
         self.load_brands()
 
+    def _current_print_settings(self) -> dict:
+        settings = printer_store.load_settings()
+        settings['show_logo'] = self.show_logo_check.isChecked()
+        settings['text_scale'] = 'large'
+        printer_store.save_settings(settings)
+        return settings
+
+    def _ensure_can_print(self) -> bool:
+        self._check_results = requirements_check.run_all_checks()
+        if requirements_check.can_print(self._check_results):
+            return True
+        _show_print_blocked_dialog(self, self._check_results)
+        self._apply_requirement_state(show_dialog=False)
+        return False
+
+    def _set_printing_active(self, active: bool):
+        self.print_button.setEnabled(not active and requirements_check.can_print(self._check_results))
+        self.bulk_print_button.setEnabled(not active and requirements_check.can_print(self._check_results))
+
+    def open_bulk_print(self):
+        if self._bulk_print_worker and self._bulk_print_worker.isRunning():
+            return
+        if self._print_worker and self._print_worker.isRunning():
+            return
+        if not self._ensure_can_print():
+            return
+
+        dialog = BulkPrintDialog(self)
+        if not dialog.exec():
+            return
+
+        jobs = dialog.selected_entries()
+        if not jobs:
+            return
+
+        if len(jobs) > 1:
+            answer = QMessageBox.question(
+                self,
+                'Bulk Print',
+                f'Print {len(jobs)} labels one after another?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        settings = self._current_print_settings()
+        self._set_printing_active(True)
+        self.printer_status.setText(f'Bulk printing 0 / {len(jobs)}...')
+
+        self._bulk_progress = QProgressDialog('Preparing bulk print...', None, 0, len(jobs), self)
+        self._bulk_progress.setWindowTitle('Bulk Print')
+        self._bulk_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._bulk_progress.setMinimumDuration(0)
+        self._bulk_progress.setValue(0)
+        self._bulk_progress.show()
+
+        self._bulk_print_worker = BulkPrintWorker(jobs, settings)
+        self._bulk_print_worker.progress.connect(self._bulk_print_progress)
+        self._bulk_print_worker.finished_ok.connect(self._bulk_print_finished)
+        self._bulk_print_worker.failed.connect(self._bulk_print_failed)
+        self._bulk_print_worker.finished.connect(self._bulk_print_done)
+        self._bulk_print_worker.start()
+
+    def _bulk_print_progress(self, completed: int, total: int, message: str):
+        if self._bulk_progress:
+            self._bulk_progress.setMaximum(total)
+            self._bulk_progress.setValue(completed)
+            self._bulk_progress.setLabelText(message)
+        self.printer_status.setText(message.replace('\n', ' — '))
+
+    def _bulk_print_finished(self, printer_name: str, total: int):
+        settings = printer_store.load_settings()
+        settings['conn'] = printer_name
+        settings['type'] = 'windows'
+        printer_store.save_settings(settings)
+        QMessageBox.information(self, 'Bulk Print', f'Printed {total} labels.')
+        self._apply_requirement_state(show_dialog=False)
+
+    def _bulk_print_failed(self, index: int, label: str, message: str):
+        QMessageBox.critical(
+            self,
+            'Bulk Print failed',
+            f'Failed on label {index}:\n{label}\n\n{message}',
+        )
+        self._apply_requirement_state(show_dialog=False)
+
+    def _bulk_print_done(self):
+        if self._bulk_progress:
+            self._bulk_progress.close()
+            self._bulk_progress = None
+        self._set_printing_active(False)
+
     def print_label(self):
         if self._print_worker and self._print_worker.isRunning():
             return
+        if self._bulk_print_worker and self._bulk_print_worker.isRunning():
+            return
 
-        self._check_results = requirements_check.run_all_checks()
-        if not requirements_check.can_print(self._check_results):
-            RequirementsDialog(self, results=self._check_results).exec()
-            self._apply_requirement_state(show_dialog=False)
+        if not self._ensure_can_print():
             return
 
         brand, model, size = self.selection_texts()
-        settings = printer_store.load_settings()
-        self.print_button.setEnabled(False)
+        settings = self._current_print_settings()
+        self._set_printing_active(True)
         self.printer_status.setText('Printing...')
         self._print_worker = PrintWorker(brand, model, size, settings)
         self._print_worker.finished_ok.connect(self._print_finished)
         self._print_worker.failed.connect(self._print_failed)
-        self._print_worker.finished.connect(lambda: self.print_button.setEnabled(True))
+        self._print_worker.finished.connect(lambda: self._set_printing_active(False))
         self._print_worker.start()
 
     def _print_finished(self, printer_name):
