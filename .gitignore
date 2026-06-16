@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Build output
+build/
+dist/
+*.spec.bak
+
+# Local data (dev machine)
+data/
+app_data/prints/*.txt
+app_data/settings/printer_settings.json
+app_data/printer_settings.json
+dependencies/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# One-off test files
+_preview_test.png
