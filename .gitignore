@@ -13,6 +13,7 @@ dist/
 # Local data (dev machine)
 data/
 app_data/prints/*.txt
+app_data/prints/*.png
 app_data/settings/printer_settings.json
 app_data/printer_settings.json
 dependencies/
@@ -26,3 +27,7 @@ Desktop.ini
 
 # One-off test files
 _preview_test.png
+
+# Accidental Windows reserved-name junk (e.g. from shell redirects)
+/nul
+NUL

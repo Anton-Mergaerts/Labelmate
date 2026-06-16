@@ -6,11 +6,23 @@ import os
 import sys
 from pathlib import Path
 
-APP_NAME = 'Labelmate'
+APP_NAME = "Labelmate"
 
 
 def is_frozen() -> bool:
-    return bool(getattr(sys, 'frozen', False))
+    return bool(getattr(sys, "frozen", False))
+
+
+def resource_root() -> Path:
+    """Directory for bundled read-only files (logo, etc.)."""
+    if is_frozen():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        internal = Path(sys.executable).resolve().parent / "_internal"
+        if internal.is_dir():
+            return internal
+    return Path(__file__).resolve().parents[1]
 
 
 def project_root() -> Path:
@@ -21,37 +33,37 @@ def project_root() -> Path:
 
 def user_data_dir() -> Path:
     if is_frozen():
-        base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
         return base / APP_NAME
     return project_root()
 
 
 def ensure_user_data() -> Path:
     root = user_data_dir()
-    (root / 'data' / 'backups').mkdir(parents=True, exist_ok=True)
-    (root / 'settings').mkdir(parents=True, exist_ok=True)
+    (root / "data" / "backups").mkdir(parents=True, exist_ok=True)
+    (root / "settings").mkdir(parents=True, exist_ok=True)
     return root
 
 
 def db_path() -> Path:
-    return user_data_dir() / 'data' / 'labelmate.db'
+    return user_data_dir() / "data" / "labelmate.db"
 
 
 def backup_dir() -> Path:
-    return user_data_dir() / 'data' / 'backups'
+    return user_data_dir() / "data" / "backups"
 
 
 def settings_path() -> Path:
     if is_frozen():
-        return user_data_dir() / 'settings' / 'printer_settings.json'
-    return project_root() / 'app_data' / 'settings' / 'printer_settings.json'
+        return user_data_dir() / "settings" / "printer_settings.json"
+    return project_root() / "app_data" / "settings" / "printer_settings.json"
 
 
 def prints_dir() -> Path:
     if is_frozen():
-        return user_data_dir() / 'prints'
-    return project_root() / 'app_data' / 'prints'
+        return user_data_dir() / "prints"
+    return project_root() / "app_data" / "prints"
 
 
 def logo_path() -> Path:
-    return project_root() / 'assets' / 'kick_logo_1024-1.webp'
+    return resource_root() / "assets" / "kick_logo_1024-1.webp"
