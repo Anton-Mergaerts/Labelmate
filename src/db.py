@@ -55,6 +55,15 @@ def init_db():
     )
     """
     )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS barcodes (
+        serial TEXT PRIMARY KEY,
+        size_id INTEGER NOT NULL,
+        FOREIGN KEY(size_id) REFERENCES sizes(id) ON DELETE CASCADE
+    )
+    """
+    )
     conn.commit()
 
     # Seed minimal data if empty
@@ -272,6 +281,7 @@ def backup_database():
 def reset_catalog():
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute("DELETE FROM barcodes")
     cur.execute("DELETE FROM sizes")
     cur.execute("DELETE FROM models")
     cur.execute("DELETE FROM brands")
@@ -280,35 +290,105 @@ def reset_catalog():
     conn.close()
 
 
-def _parse_catalog_csv(path: Path | str) -> list[tuple[str, str, str]]:
+def _normalize_serial(value: str) -> str:
+    return value.strip()
+
+
+def _split_serials(cell: str) -> list[str]:
+    if not cell or not cell.strip():
+        return []
+    serials: list[str] = []
+    for chunk in cell.replace(";", ",").split(","):
+        serial = _normalize_serial(chunk)
+        if serial:
+            serials.append(serial)
+    return serials
+
+
+def _csv_column(columns: dict[str, int], exact: str, *keywords: str) -> int | None:
+    if exact in columns:
+        return columns[exact]
+    for name, index in columns.items():
+        if any(keyword in name for keyword in keywords):
+            return index
+    return None
+
+
+def _detect_csv_delimiter(sample: str) -> str:
+    if sample.count(";") >= sample.count(","):
+        return ";"
+    return ","
+
+
+def _parse_catalog_csv(path: Path | str) -> list[tuple[str, str, str, list[str]]]:
     with open(path, newline="", encoding="utf-8-sig") as handle:
-        reader = csv.reader(handle)
+        sample = handle.read(4096)
+        handle.seek(0)
+        delimiter = _detect_csv_delimiter(sample.splitlines()[0] if sample else ",")
+        reader = csv.reader(handle, delimiter=delimiter)
         header = next(reader, None)
         if not header:
             raise ValueError("CSV file is empty.")
         columns = {name.strip().lower(): index for index, name in enumerate(header)}
-        missing = [name for name in ("brand", "model", "size") if name not in columns]
+
+        brand_col = _csv_column(columns, "brand", "brand")
+        model_col = _csv_column(columns, "model", "model")
+        size_col = _csv_column(columns, "size", "size")
+        serial_col = _csv_column(columns, "serial", "barcode", "qr", "rfid")
+
+        missing = []
+        if brand_col is None:
+            missing.append("brand")
+        if model_col is None:
+            missing.append("model")
+        if size_col is None:
+            missing.append("size")
         if missing:
             raise ValueError(
                 f'CSV must include columns: brand, model, size (missing: {", ".join(missing)})'
             )
 
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str, list[str]]] = []
         for line_no, record in enumerate(reader, start=2):
             if not record or not any(cell.strip() for cell in record):
                 continue
             try:
-                brand = record[columns["brand"]].strip()
-                model = record[columns["model"]].strip()
-                size = record[columns["size"]].strip()
+                brand = record[brand_col].strip()
+                model = record[model_col].strip()
+                size = record[size_col].strip()
+                serial_cell = record[serial_col].strip() if serial_col is not None else ""
             except IndexError as exc:
                 raise ValueError(f"CSV row {line_no} is incomplete.") from exc
             if not brand or not model or not size:
                 raise ValueError(f"CSV row {line_no} must have brand, model, and size.")
-            rows.append((brand, model, size))
+            rows.append((brand, model, size, _split_serials(serial_cell)))
     if not rows:
         raise ValueError("CSV file has a header but no data rows.")
     return rows
+
+
+def lookup_by_barcode(serial: str) -> dict[str, str] | None:
+    serial = _normalize_serial(serial)
+    if not serial:
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT b.name, m.name, s.name
+        FROM barcodes bc
+        JOIN sizes s ON s.id = bc.size_id
+        JOIN models m ON m.id = s.model_id
+        JOIN brands b ON b.id = m.brand_id
+        WHERE bc.serial = ?
+        """,
+        (serial,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"brand": row[0], "model": row[1], "size": row[2]}
 
 
 def export_catalog_csv(path: Path | str) -> int:
@@ -316,10 +396,16 @@ def export_catalog_csv(path: Path | str) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT b.name, m.name, s.name
-        FROM brands b
-        JOIN models m ON m.brand_id = b.id
-        JOIN sizes s ON s.model_id = m.id
+        SELECT
+            GROUP_CONCAT(bc.serial, ',') AS serials,
+            b.name,
+            m.name,
+            s.name
+        FROM sizes s
+        JOIN models m ON m.id = s.model_id
+        JOIN brands b ON b.id = m.brand_id
+        LEFT JOIN barcodes bc ON bc.size_id = s.id
+        GROUP BY s.id
         ORDER BY b.name, m.name, s.name
         """
     )
@@ -327,10 +413,61 @@ def export_catalog_csv(path: Path | str) -> int:
     conn.close()
 
     with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["brand", "model", "size"])
-        writer.writerows(rows)
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(["QR codes / RFID serial numbers", "Brand", "Model", "Size"])
+        for serials, brand, model, size in rows:
+            writer.writerow([serials or "", brand, model, size])
     return len(rows)
+
+
+def _get_or_create_size_id(
+    cur: sqlite3.Cursor,
+    brand_ids: dict[str, int],
+    model_ids: dict[tuple[int, str], int],
+    brand: str,
+    model: str,
+    size: str,
+) -> tuple[int, bool]:
+    if brand not in brand_ids:
+        cur.execute("SELECT id FROM brands WHERE name = ?", (brand,))
+        found = cur.fetchone()
+        if found:
+            brand_ids[brand] = found[0]
+        else:
+            cur.execute("INSERT INTO brands (name) VALUES (?)", (brand,))
+            brand_ids[brand] = cur.lastrowid
+
+    brand_id = brand_ids[brand]
+    model_key = (brand_id, model)
+    if model_key not in model_ids:
+        cur.execute(
+            "SELECT id FROM models WHERE brand_id = ? AND name = ?",
+            (brand_id, model),
+        )
+        found = cur.fetchone()
+        if found:
+            model_ids[model_key] = found[0]
+        else:
+            cur.execute(
+                "INSERT INTO models (brand_id, name) VALUES (?, ?)",
+                (brand_id, model),
+            )
+            model_ids[model_key] = cur.lastrowid
+
+    model_id = model_ids[model_key]
+    cur.execute(
+        "SELECT id FROM sizes WHERE model_id = ? AND name = ?",
+        (model_id, size),
+    )
+    found = cur.fetchone()
+    if found:
+        return found[0], False
+
+    cur.execute(
+        "INSERT INTO sizes (model_id, name) VALUES (?, ?)",
+        (model_id, size),
+    )
+    return cur.lastrowid, True
 
 
 def import_catalog_csv(path: Path | str, *, replace: bool = True) -> dict:
@@ -339,6 +476,7 @@ def import_catalog_csv(path: Path | str, *, replace: bool = True) -> dict:
     cur = conn.cursor()
     try:
         if replace:
+            cur.execute("DELETE FROM barcodes")
             cur.execute("DELETE FROM sizes")
             cur.execute("DELETE FROM models")
             cur.execute("DELETE FROM brands")
@@ -346,48 +484,29 @@ def import_catalog_csv(path: Path | str, *, replace: bool = True) -> dict:
         brand_ids: dict[str, int] = {}
         model_ids: dict[tuple[int, str], int] = {}
         sizes_added = 0
+        barcodes_added = 0
 
-        for brand, model, size in rows:
-            if brand not in brand_ids:
-                cur.execute("SELECT id FROM brands WHERE name = ?", (brand,))
-                found = cur.fetchone()
-                if found:
-                    brand_ids[brand] = found[0]
-                else:
-                    cur.execute("INSERT INTO brands (name) VALUES (?)", (brand,))
-                    brand_ids[brand] = cur.lastrowid
-
-            brand_id = brand_ids[brand]
-            model_key = (brand_id, model)
-            if model_key not in model_ids:
-                cur.execute(
-                    "SELECT id FROM models WHERE brand_id = ? AND name = ?",
-                    (brand_id, model),
-                )
-                found = cur.fetchone()
-                if found:
-                    model_ids[model_key] = found[0]
-                else:
-                    cur.execute(
-                        "INSERT INTO models (brand_id, name) VALUES (?, ?)",
-                        (brand_id, model),
-                    )
-                    model_ids[model_key] = cur.lastrowid
-
-            model_id = model_ids[model_key]
-            cur.execute(
-                "SELECT id FROM sizes WHERE model_id = ? AND name = ?",
-                (model_id, size),
+        for brand, model, size, serials in rows:
+            size_id, created = _get_or_create_size_id(
+                cur, brand_ids, model_ids, brand, model, size
             )
-            if not cur.fetchone():
-                cur.execute(
-                    "INSERT INTO sizes (model_id, name) VALUES (?, ?)",
-                    (model_id, size),
-                )
+            if created:
                 sizes_added += 1
+
+            for serial in serials:
+                cur.execute(
+                    "INSERT OR REPLACE INTO barcodes (serial, size_id) VALUES (?, ?)",
+                    (serial, size_id),
+                )
+                barcodes_added += 1
 
         conn.commit()
     finally:
         conn.close()
 
-    return {"rows_read": len(rows), "sizes_added": sizes_added, "replaced": replace}
+    return {
+        "rows_read": len(rows),
+        "sizes_added": sizes_added,
+        "barcodes_added": barcodes_added,
+        "replaced": replace,
+    }

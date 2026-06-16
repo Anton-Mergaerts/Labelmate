@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QInputDialog,
+    QLineEdit,
 )
 
 from src import db
@@ -887,7 +888,8 @@ class DatabaseManagerDialog(QDialog):
 
         layout.addWidget(QLabel('Catalog import / export'))
         layout.addWidget(QLabel(
-            'CSV format: brand, model, size — one label combination per row. '
+            'CSV format: Brand, Model, Size, plus optional barcode/QR/RFID serial column. '
+            'Semicolon or comma delimiters; multiple serials per row can be comma-separated. '
             'Edit in Excel or Google Sheets, then import here.'
         ))
         layout.addWidget(self._button('Export catalog to CSV…', self.export_catalog_csv))
@@ -1135,7 +1137,8 @@ class DatabaseManagerDialog(QDialog):
             self,
             'Import CSV',
             f'{mode.capitalize()} {result["rows_read"]} CSV row(s).\n'
-            f'New sizes added: {result["sizes_added"]}.',
+            f'New sizes added: {result["sizes_added"]}.\n'
+            f'Barcodes linked: {result["barcodes_added"]}.',
         )
         self.refresh_all()
 
@@ -1231,9 +1234,22 @@ class MainWindow(QMainWindow):
         title_row.addWidget(badge)
         layout.addLayout(title_row)
 
-        hint = QLabel('Use the catalog selections to compose the next label.')
+        hint = QLabel('Scan a barcode or pick from the catalog below.')
         hint.setObjectName('CardSubTitle')
         layout.addWidget(hint)
+
+        scan_row = QHBoxLayout()
+        self.scan_field = QLineEdit()
+        self.scan_field.setPlaceholderText('Scan barcode (ID + Enter)…')
+        self.scan_field.setClearButtonEnabled(True)
+        self.scan_field.returnPressed.connect(self._handle_barcode_scan)
+        scan_row.addWidget(self.scan_field, 1)
+
+        self.scan_print_check = QCheckBox('Print on scan')
+        self.scan_print_check.setObjectName('ScanPrintCheck')
+        scan_row.addWidget(self.scan_print_check)
+        layout.addLayout(scan_row)
+        self._load_scan_settings()
 
         form = QGridLayout()
         form.setHorizontalSpacing(12)
@@ -1264,6 +1280,7 @@ class MainWindow(QMainWindow):
         self.model_combo.currentIndexChanged.connect(self.load_sizes)
         self.size_combo.currentIndexChanged.connect(self.update_preview)
         self.show_logo_check.toggled.connect(self._show_logo_changed)
+        self.scan_print_check.toggled.connect(self._scan_print_changed)
 
         button_row = QHBoxLayout()
         layout.addLayout(button_row)
@@ -1344,6 +1361,76 @@ class MainWindow(QMainWindow):
         settings['show_logo'] = checked
         printer_store.save_settings(settings)
         self.update_preview()
+
+    def _load_scan_settings(self):
+        settings = printer_store.load_settings()
+        self.scan_print_check.blockSignals(True)
+        self.scan_print_check.setChecked(settings.get('scan_to_print', True))
+        self.scan_print_check.blockSignals(False)
+
+    def _scan_print_changed(self, checked: bool):
+        settings = printer_store.load_settings()
+        settings['scan_to_print'] = checked
+        printer_store.save_settings(settings)
+
+    def _select_catalog_entry(self, brand: str, model: str, size: str) -> bool:
+        brand_index = self.brand_combo.findText(brand, Qt.MatchFlag.MatchExactly)
+        if brand_index < 0:
+            return False
+        self.brand_combo.blockSignals(True)
+        self.brand_combo.setCurrentIndex(brand_index)
+        self.brand_combo.blockSignals(False)
+        self.load_models()
+
+        model_index = self.model_combo.findText(model, Qt.MatchFlag.MatchExactly)
+        if model_index < 0:
+            return False
+        self.model_combo.blockSignals(True)
+        self.model_combo.setCurrentIndex(model_index)
+        self.model_combo.blockSignals(False)
+        self.load_sizes()
+
+        size_index = self.size_combo.findText(size, Qt.MatchFlag.MatchExactly)
+        if size_index < 0:
+            return False
+        self.size_combo.blockSignals(True)
+        self.size_combo.setCurrentIndex(size_index)
+        self.size_combo.blockSignals(False)
+        self.update_preview()
+        return True
+
+    def _handle_barcode_scan(self):
+        serial = self.scan_field.text().strip()
+        self.scan_field.clear()
+        if not serial:
+            return
+
+        entry = db.lookup_by_barcode(serial)
+        if not entry:
+            self.printer_status.setText(f'Unknown barcode: {serial}')
+            self.scan_field.setFocus()
+            return
+
+        if not self._select_catalog_entry(entry['brand'], entry['model'], entry['size']):
+            self.printer_status.setText(
+                f'Barcode {serial} is in the database but the catalog entry is missing.'
+            )
+            self.scan_field.setFocus()
+            return
+
+        self.printer_status.setText(
+            f'Scanned {serial} → {entry["brand"]} / {entry["model"]} / {entry["size"]}'
+        )
+
+        if self.scan_print_check.isChecked():
+            self.print_label()
+
+        self.scan_field.setFocus()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, 'scan_field'):
+            self.scan_field.setFocus()
 
     def load_brands(self):
         self.brand_combo.blockSignals(True)

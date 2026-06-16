@@ -15,6 +15,8 @@ DEFAULT_LABEL_HEIGHT_PX = 220
 MARGIN = 10
 LINE_GAP = 10
 DIVIDER_GAP = 8
+FIT_PAD = 6
+TEXT_ANCHOR = 'lt'
 RIGHT_COLUMN_MIN_PX = 190
 COLUMN_GAP = 20
 LOGO_COLUMN_PX = 90
@@ -149,9 +151,41 @@ def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | Ima
     return ImageFont.load_default()
 
 
+def _text_bbox(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font,
+    *,
+    x: int = 0,
+    y: int = 0,
+) -> tuple[int, int, int, int]:
+    return draw.textbbox((x, y), text, font=font, anchor=TEXT_ANCHOR)
+
+
 def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
-    bbox = draw.textbbox((0, 0), text, font=font)
+    bbox = _text_bbox(draw, text, font)
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
+    width, _ = _text_size(draw, text, font)
+    return width
+
+
+def _ellipsis_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font,
+    *,
+    max_width: int,
+) -> str:
+    if _text_width(draw, text, font) <= max_width:
+        return text
+    ellipsis = '…'
+    trimmed = text
+    while trimmed and _text_width(draw, f'{trimmed}{ellipsis}', font) > max_width:
+        trimmed = trimmed[:-1]
+    return f'{trimmed}{ellipsis}' if trimmed else ellipsis
 
 
 def _fit_font(
@@ -162,15 +196,19 @@ def _fit_font(
     start_size: int,
     min_size: int,
     bold: bool = False,
+    absolute_min: int = 10,
 ):
     size = start_size
-    while size >= min_size:
+    floor = max(1, min(min_size, absolute_min))
+    while size >= floor:
         font = _load_font(size, bold=bold)
         width, _ = _text_size(draw, text, font)
         if width <= max_width:
-            return font
-        size -= 2
-    return _load_font(min_size, bold=bold)
+            return font, text
+        size -= 1
+
+    font = _load_font(floor, bold=bold)
+    return font, _ellipsis_text(draw, text, font, max_width=max_width)
 
 
 def _label_height(label_size: str) -> tuple[int, str]:
@@ -264,7 +302,7 @@ def _banner_font(
     layout: str,
     factor: float,
 ):
-    return _fit_font(
+    font, _ = _fit_font(
         draw,
         text,
         max_width=PRINTABLE_WIDTH_PX - _scaled(24, factor),
@@ -272,6 +310,7 @@ def _banner_font(
         min_size=_scaled(13 if layout == 'compact' else 16, factor),
         bold=True,
     )
+    return font
 
 
 def _banner_layout(
@@ -359,6 +398,28 @@ def _compose_label_with_banners(
     return image
 
 
+def _header_layout(
+    draw: ImageDraw.ImageDraw,
+    *,
+    brand_text: str,
+    brand_font,
+    size_text: str,
+    size_font,
+    text_left: int,
+    size_x: int,
+    y: int,
+) -> tuple[int, int, int, int, int, int, int]:
+    brand_w, brand_h = _text_size(draw, brand_text, brand_font)
+    size_w, size_h = _text_size(draw, size_text, size_font)
+    header_h = max(brand_h, size_h)
+    brand_y = y + (header_h - brand_h) // 2
+    size_y = y + (header_h - size_h) // 2
+    brand_bbox = _text_bbox(draw, brand_text, brand_font, x=text_left, y=brand_y)
+    size_bbox = _text_bbox(draw, size_text, size_font, x=size_x, y=size_y)
+    header_bottom = max(brand_bbox[3], size_bbox[3])
+    return brand_y, size_y, header_bottom, brand_bbox[2], size_bbox[0], brand_h, size_h
+
+
 def _render_label_body(
     brand: str,
     model: str,
@@ -370,99 +431,175 @@ def _render_label_body(
     tight_vertical: bool = False,
 ) -> Image.Image:
     factor = text_scale_factor(text_scale)
-    height, layout = _label_height(label_size)
+    min_height, layout = _label_height(label_size)
     if layout == 'large' and label_size not in ('62x100', '62x29') and not tight_vertical:
-        height = _scaled(height, factor)
+        min_height = _scaled(min_height, factor)
 
     margin = _scaled(6 if tight_vertical else (8 if layout == 'compact' else MARGIN), factor)
     line_gap = _scaled(4 if layout == 'compact' else LINE_GAP, factor)
     divider_gap = _scaled(4 if tight_vertical else (5 if layout == 'compact' else DIVIDER_GAP), factor)
-    right_min = _scaled(88 if layout == 'compact' else RIGHT_COLUMN_MIN_PX, factor)
+    right_max = _scaled(150 if layout == 'compact' else 220, factor)
     column_gap = _scaled(10 if layout == 'compact' else COLUMN_GAP, factor)
     logo_source = _label_logo_source() if show_logo else None
     logo_column, logo_gap = _logo_column(layout, factor, logo_source is not None)
+    fit_pad = _scaled(FIT_PAD, factor)
     text_left = margin + logo_column + logo_gap
-    text_width = PRINTABLE_WIDTH_PX - text_left - margin
+    text_width = PRINTABLE_WIDTH_PX - text_left - margin - fit_pad
+    text_right = PRINTABLE_WIDTH_PX - margin - fit_pad
+
+    probe = Image.new('RGB', (PRINTABLE_WIDTH_PX, 1), 'white')
+    draw = ImageDraw.Draw(probe)
+
+    if layout == 'compact':
+        size_start, size_min = _scaled(34, factor), _scaled(22, factor)
+        brand_start, brand_min = _scaled(24, factor), _scaled(16, factor)
+        model_start, model_min = _scaled(18, factor), _scaled(14, factor)
+    else:
+        size_start, size_min = _scaled(64, factor), _scaled(34, factor)
+        brand_start, brand_min = _scaled(56, factor), _scaled(28, factor)
+        model_start, model_min = _scaled(38, factor), _scaled(20, factor)
+
+    eff_size_start = size_start
+    eff_brand_start = brand_start
+    eff_model_start = model_start
+
+    for _ in range(48):
+        size_font, size_text = _fit_font(
+            draw,
+            size,
+            max_width=right_max,
+            start_size=eff_size_start,
+            min_size=size_min,
+            bold=True,
+        )
+        size_w, _ = _text_size(draw, size_text, size_font)
+        size_x = text_right - size_w
+
+        brand_font, brand_text = _fit_font(
+            draw,
+            brand,
+            max_width=max(1, size_x - text_left - column_gap),
+            start_size=eff_brand_start,
+            min_size=brand_min,
+            bold=True,
+        )
+
+        model_font, model_text = _fit_font(
+            draw,
+            model,
+            max_width=text_width,
+            start_size=eff_model_start,
+            min_size=model_min,
+            absolute_min=8,
+        )
+
+        header_y = margin
+        (
+            brand_y,
+            size_y,
+            header_bottom,
+            brand_right,
+            size_left,
+            brand_h,
+            size_h,
+        ) = _header_layout(
+            draw,
+            brand_text=brand_text,
+            brand_font=brand_font,
+            size_text=size_text,
+            size_font=size_font,
+            text_left=text_left,
+            size_x=size_x,
+            y=header_y,
+        )
+
+        model_gap = _scaled(5 if tight_vertical else (6 if layout == 'compact' else 8), factor)
+        rule_y = header_bottom + divider_gap
+        model_y = rule_y + 1 + model_gap
+        model_bbox = _text_bbox(
+            draw,
+            model_text,
+            model_font,
+            x=text_left,
+            y=model_y,
+        )
+        model_h = model_bbox[3] - model_bbox[1]
+        block_h = model_bbox[3] - header_y
+        needed_h = block_h + margin * 2
+
+        header_ok = brand_right + column_gap <= size_left
+        if header_ok and (layout != 'compact' or needed_h <= min_height):
+            break
+
+        if (
+            eff_size_start <= size_min
+            and eff_brand_start <= brand_min
+            and eff_model_start <= model_min
+        ):
+            break
+
+        eff_size_start = max(size_min, eff_size_start - 1)
+        eff_brand_start = max(brand_min, eff_brand_start - 1)
+        eff_model_start = max(model_min, eff_model_start - 1)
+
+    if layout == 'compact':
+        height = min_height
+    else:
+        height = max(min_height, needed_h)
 
     image = Image.new('RGB', (PRINTABLE_WIDTH_PX, height), 'white')
     draw = ImageDraw.Draw(image)
 
-    if layout == 'compact':
-        size_font = _fit_font(
-            draw,
-            size,
-            max_width=right_min,
-            start_size=_scaled(34, factor),
-            min_size=_scaled(22, factor),
-            bold=True,
-        )
-        brand_font = _fit_font(
-            draw,
-            brand,
-            max_width=text_width - right_min - column_gap,
-            start_size=_scaled(24, factor),
-            min_size=_scaled(16, factor),
-            bold=True,
-        )
-        model_font = _fit_font(
-            draw,
-            model,
-            max_width=text_width,
-            start_size=_scaled(18, factor),
-            min_size=_scaled(14, factor),
-        )
-    else:
-        size_font = _fit_font(
-            draw,
-            size,
-            max_width=right_min,
-            start_size=_scaled(64, factor),
-            min_size=_scaled(40, factor),
-            bold=True,
-        )
-        brand_font = _fit_font(
-            draw,
-            brand,
-            max_width=text_width - right_min - column_gap,
-            start_size=_scaled(56, factor),
-            min_size=_scaled(32, factor),
-            bold=True,
-        )
-        model_font = _fit_font(
-            draw,
-            model,
-            max_width=text_width,
-            start_size=_scaled(38, factor),
-            min_size=_scaled(24, factor),
-        )
-
-    size_w, size_h = _text_size(draw, size, size_font)
-    _, brand_h = _text_size(draw, brand, brand_font)
-    _, model_h = _text_size(draw, model, model_font)
-
-    header_h = max(brand_h, size_h)
-    model_gap = _scaled(6 if tight_vertical else 8, factor)
-    block_h = header_h + divider_gap + 1 + model_gap + model_h
     y = margin if tight_vertical else max(margin, (height - block_h) // 2)
+    size_w, _ = _text_size(draw, size_text, size_font)
+    size_x = text_right - size_w
+    brand_y, size_y, header_bottom, _, _, _, _ = _header_layout(
+        draw,
+        brand_text=brand_text,
+        brand_font=brand_font,
+        size_text=size_text,
+        size_font=size_font,
+        text_left=text_left,
+        size_x=size_x,
+        y=y,
+    )
 
-    size_x = PRINTABLE_WIDTH_PX - margin - size_w
-    brand_y = y + (header_h - brand_h) // 2
-    size_y = y + (header_h - size_h) // 2
+    draw.text(
+        (text_left, brand_y),
+        brand_text,
+        fill='black',
+        font=brand_font,
+        anchor=TEXT_ANCHOR,
+    )
+    draw.text(
+        (size_x, size_y),
+        size_text,
+        fill='black',
+        font=size_font,
+        anchor=TEXT_ANCHOR,
+    )
 
-    draw.text((text_left, brand_y), brand, fill='black', font=brand_font)
-    draw.text((size_x, size_y), size, fill='black', font=size_font)
+    rule_y = header_bottom + divider_gap
+    draw.line(
+        (text_left, rule_y, text_right, rule_y),
+        fill='#c8d0dc',
+        width=1,
+    )
 
-    rule_y = y + header_h + divider_gap
-    draw.line((text_left, rule_y, PRINTABLE_WIDTH_PX - margin, rule_y), fill='#c8d0dc', width=1)
-
-    model_y = rule_y + model_gap
-    draw.text((text_left, model_y), model, fill='black', font=model_font)
+    model_y = rule_y + 1 + model_gap
+    draw.text(
+        (text_left, model_y),
+        model_text,
+        fill='black',
+        font=model_font,
+        anchor=TEXT_ANCHOR,
+    )
 
     if logo_source is not None:
         logo = _fit_logo(
             logo_source,
             max_width=logo_column,
-            max_height=max(1, height - margin * 2),
+            max_height=max(1, block_h),
         )
         logo_x = margin + (logo_column - logo.width) // 2
         logo_y = y + (block_h - logo.height) // 2

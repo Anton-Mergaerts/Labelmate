@@ -11,6 +11,7 @@ DEFAULT_SETTINGS = {
     'text_scale': 'large',
     'show_logo': True,
     'footer_spacing': 'normal',
+    'scan_to_print': True,
 }
 
 
@@ -65,6 +66,10 @@ def ensure_printer_configured():
 
     if settings.get('footer_spacing') not in ('tight', 'normal', 'loose'):
         settings['footer_spacing'] = 'normal'
+        changed = True
+
+    if not isinstance(settings.get('scan_to_print'), bool):
+        settings['scan_to_print'] = True
         changed = True
 
     conn = settings.get('conn', '').strip()
